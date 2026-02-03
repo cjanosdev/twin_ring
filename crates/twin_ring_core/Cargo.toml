@@ -1,0 +1,13 @@
+[package]
+name = "twin_ring_core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+dashmap = "6.1.0"
+chrono = { version = "0.4", features = ["clock"] }

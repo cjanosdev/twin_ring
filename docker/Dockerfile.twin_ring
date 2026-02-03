@@ -1,0 +1,25 @@
+FROM rustlang/rust:nightly AS builder
+WORKDIR /app
+
+# Copy source and build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Build both binaries
+RUN cargo build -p twin_ring_exp --bin preload --release && \
+    cargo build -p twin_ring_node --release
+
+# ---- Runtime stage ----
+FROM debian:bookworm-slim
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y libssl3 libuv1 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy both built binaries
+COPY --from=builder /app/target/release/preload /app/preload
+COPY --from=builder /app/target/release/twin_ring_node /app/twin_ring_node
+
+
+CMD ["/app/twin_ring_node"]

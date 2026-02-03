@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+      - CASSANDRA_NUM_TOKENS=8
+      - CASSANDRA_CONCURRENT_READS=1
+      - CASSANDRA_CONCURRENT_WRITES=1
+      - CASSANDRA_CONCURRENT_COMPACTORS=1
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    mem_limit: 512m
+    cpus: 0.5
+
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./cassandra-init.cql:/cassandra-init.cql
+    entrypoint: ["sh", "-c", "cqlsh cassandra -f /cassandra-init.cql"]
+    restart: "on-failure"
+
+  preload:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile.twin_ring
+    command: ["/app/preload"]
+    environment:
+      PRELOAD_KEYS: "100000"   # number of keys to insert (can change per run)
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: "on-failure"
+
+
+  control:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile.control
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # <-- control node has access
+    depends_on:
+      - cache_node_1
+      - cache_node_2
+      - cache_node_3
+
+  cache_node_1:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile.twin_ring
+    command: ["/app/twin_ring_node", "--port", "8001", "--ttl", "10", "--log", "cache1.csv"]
+    ports:
+      - "8001:8001"
+    environment:
+      GROUP_NAME: "kv"
+      CASSANDRA_HOST: "cassandra"
+      CASSANDRA_PORT: "9042"
+      CASSANDRA_KEYSPACE: "kvstore"
+    depends_on:
+      preload:
+        condition: service_completed_successfully
+
+  cache_node_2:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile.twin_ring
+    command: ["/app/twin_ring_node", "--port", "8002", "--ttl", "10", "--log", "cache2.csv"]
+    ports:
+      - "8002:8002"
+    environment:
+      GROUP_NAME: "kv"
+      CASSANDRA_HOST: "cassandra"
+      CASSANDRA_PORT: "9042"
+      CASSANDRA_KEYSPACE: "kvstore"
+    depends_on:
+      preload:
+        condition: service_completed_successfully
+
+  cache_node_3:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile.twin_ring
+    command: ["/app/twin_ring_node", "--port", "8003", "--ttl", "10", "--log", "cache3.csv"]
+    ports:
+      - "8003:8003"
+    environment:
+      GROUP_NAME: "kv"
+      CASSANDRA_HOST: "cassandra"
+      CASSANDRA_PORT: "9042"
+      CASSANDRA_KEYSPACE: "kvstore"
+    depends_on:
+      preload:
+        condition: service_completed_successfully

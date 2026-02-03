@@ -1,0 +1,26 @@
+[package]
+name = "twin_ring_node"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "control_api"
+path = "src/bin/control_api.rs"
+
+
+[dependencies]
+
+## HTTP server framework
+actix-web = "4"
+
+## command-line arguments.
+clap = { version = "4", features = ["derive"] }
+
+## async runtime.
+tokio = { version = "1", features = ["full"] } 
+
+bollard = "0.17"
+
+num_cpus = "1.16"
+
+twin_ring_core = { path = "../twin_ring_core" }

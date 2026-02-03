@@ -1,0 +1,28 @@
+# ---- Builder Stage ----
+FROM rustlang/rust:nightly AS builder
+WORKDIR /app
+
+# Copy source
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Build control binary from twin_ring_node crate
+RUN cargo build -p twin_ring_node --bin control_api --release
+
+# ---- Runtime Stage ----
+FROM debian:bookworm-slim
+WORKDIR /app
+
+# Install minimal dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/control_api /app/control_api
+
+# Allow talking to Docker daemon
+VOLUME ["/var/run/docker.sock"]
+
+# Run control API
+CMD ["/app/control_api"]
