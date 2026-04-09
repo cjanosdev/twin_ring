@@ -2836,6 +2836,8 @@ dependencies = [
  "rand_chacha 0.9.0",
  "reqwest",
  "scylla",
+ "serde",
+ "serde_json",
  "tokio",
  "twin_ring_core",
 ]
@@ -2845,9 +2847,13 @@ name = "twin_ring_node"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "anyhow",
  "bollard",
  "clap",
+ "futures-util",
  "num_cpus",
+ "scylla",
+ "serde_json",
  "tokio",
  "twin_ring_core",
 ]

@@ -20,7 +20,14 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] } 
 
 bollard = "0.17"
+futures-util = "0.3"
 
 num_cpus = "1.16"
+
+scylla = "0.12"
+
+anyhow = "1"
+
+serde_json = "1"
 
 twin_ring_core = { path = "../twin_ring_core" }

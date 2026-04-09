@@ -7,19 +7,23 @@ services:
     ports:
       - "9042:9042"
     environment:
-      - MAX_HEAP_SIZE=512M
-      - HEAP_NEWSIZE=128M
-      - CASSANDRA_NUM_TOKENS=8
-      - CASSANDRA_CONCURRENT_READS=1
-      - CASSANDRA_CONCURRENT_WRITES=1
+      # Hard JVM heap cap — prevents Cassandra from borrowing host memory.
+      # Small heap → more GC pressure → slower under load (good for experiments).
+      - MAX_HEAP_SIZE=192M
+      - HEAP_NEWSIZE=48M
+      # Read/write thread pools — low values keep Cassandra saturated under the
+      # thundering herd so the metastable loop sustains.
+      - CASSANDRA_CONCURRENT_READS=2
+      - CASSANDRA_CONCURRENT_WRITES=2
       - CASSANDRA_CONCURRENT_COMPACTORS=1
+      - CASSANDRA_NUM_TOKENS=8
     healthcheck:
-      test: ["CMD", "cqlsh", "-e", "describe keyspaces"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
+      test: ["CMD", "bash", "-lc", "cqlsh -e 'SELECT now() FROM system.local'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     mem_limit: 512m
-    cpus: 0.5
+    cpus: 0.75
 
   cassandra-init:
     image: cassandra:4.1
@@ -61,7 +65,7 @@ services:
     build:
       context: ..
       dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/twin_ring_node", "--port", "8001", "--ttl", "10", "--log", "cache1.csv"]
+    command: ["/app/twin_ring_node", "--port", "8001", "--ttl", "30", "--log", "cache1.csv"]
     ports:
       - "8001:8001"
     environment:
@@ -69,6 +73,8 @@ services:
       CASSANDRA_HOST: "cassandra"
       CASSANDRA_PORT: "9042"
       CASSANDRA_KEYSPACE: "kvstore"
+    mem_limit: 128m
+    cpus: 1.0
     depends_on:
       preload:
         condition: service_completed_successfully
@@ -77,7 +83,7 @@ services:
     build:
       context: ..
       dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/twin_ring_node", "--port", "8002", "--ttl", "10", "--log", "cache2.csv"]
+    command: ["/app/twin_ring_node", "--port", "8002", "--ttl", "30", "--log", "cache2.csv"]
     ports:
       - "8002:8002"
     environment:
@@ -85,6 +91,8 @@ services:
       CASSANDRA_HOST: "cassandra"
       CASSANDRA_PORT: "9042"
       CASSANDRA_KEYSPACE: "kvstore"
+    mem_limit: 128m
+    cpus: 1.0
     depends_on:
       preload:
         condition: service_completed_successfully
@@ -93,7 +101,7 @@ services:
     build:
       context: ..
       dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/twin_ring_node", "--port", "8003", "--ttl", "10", "--log", "cache3.csv"]
+    command: ["/app/twin_ring_node", "--port", "8003", "--ttl", "30", "--log", "cache3.csv"]
     ports:
       - "8003:8003"
     environment:
@@ -101,6 +109,8 @@ services:
       CASSANDRA_HOST: "cassandra"
       CASSANDRA_PORT: "9042"
       CASSANDRA_KEYSPACE: "kvstore"
+    mem_limit: 128m
+    cpus: 1.0
     depends_on:
       preload:
         condition: service_completed_successfully

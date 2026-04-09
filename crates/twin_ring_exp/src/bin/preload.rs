@@ -1,12 +1,23 @@
 use scylla::{Session, SessionBuilder};
 use anyhow::Result;
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::sync::Arc;
+
+const CONCURRENCY: usize = 64;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let session: Session = SessionBuilder::new()
-        .known_node("cassandra:9042")
-        .build()
-        .await?;
+    let total: usize = std::env::var("PRELOAD_KEYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100_000);
+
+    let session: Arc<Session> = Arc::new(
+        SessionBuilder::new()
+            .known_node("cassandra:9042")
+            .build()
+            .await?,
+    );
 
     session
         .query(
@@ -23,70 +34,34 @@ async fn main() -> Result<()> {
         )
         .await?;
 
-    for i in 0..100_000 {
-        let key = format!("key{}", i);
-        let val = format!("val{}", i);
+    let prepared = Arc::new(
         session
-            .query("INSERT INTO kvstore.kv (key, value) VALUES (?, ?)", (key, val))
-            .await?;
+            .prepare("INSERT INTO kvstore.kv (key, value) VALUES (?, ?)")
+            .await?,
+    );
+
+    let mut in_flight = FuturesUnordered::new();
+
+    for i in 0..total {
+        let session = Arc::clone(&session);
+        let prepared = Arc::clone(&prepared);
+        in_flight.push(async move {
+            let key = format!("key{}", i);
+            let val = format!("val{}", i);
+            session.execute(&prepared, (key, val)).await
+        });
+
+        // Drain one completed future whenever we hit the concurrency cap
+        if in_flight.len() >= CONCURRENCY {
+            in_flight.next().await.unwrap()?;
+        }
     }
 
-    println!("✅ Preloaded 100k keys into Cassandra");
+    // Drain remaining
+    while let Some(result) = in_flight.next().await {
+        result?;
+    }
+
+    println!("✅ Preloaded {} keys into Cassandra", total);
     Ok(())
 }
-
-
-
-
-
-
-
-
-// use cassandra_cpp::{Cluster, Error};
-// use anyhow::Result;
-
-// #[tokio::main]
-// async fn main() -> Result<(), Error> {
-//     // Step 1: create the cluster object
-//     let mut cluster = Cluster::default();
-
-//     // Step 2: configure it
-//     cluster.set_contact_points("cassandra")?; // service name in docker-compose
-//     cluster.set_port(9042)?;
-
-//     // Step 3: connect
-//     let session = cluster.connect().await?;
-
-//     // Make sure keyspace and table exist
-//     let create_keyspace = "
-//         CREATE KEYSPACE IF NOT EXISTS kvstore
-//         WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 1};
-//     ";
-    
-//     session.execute(create_keyspace).await?;
-    
-//     let create_table = "
-//     CREATE TABLE IF NOT EXISTS kvstore.kv (
-//         key text PRIMARY KEY,
-//         value text
-//         );
-//         ";
-
-//     session.execute(create_table).await?;
-    
-//     println!("✅ Keyspace and table ready");
-
-//     // Insert a bunch of records
-//     for i in 0..100_000 {
-//         let key = format!("key{}", i);
-//         let val = format!("val{}", i);
-
-//         let mut statement = session.statement("INSERT INTO kvstore.kv (key, value) VALUES (?, ?)");
-//         statement.bind_string(0, &key)?;
-//         statement.bind_string(1, &val)?;
-//         statement.execute().await?;
-//     }
-
-//     println!("✅ Preloaded 100k keys into Cassandra");
-//     Ok(())
-// }

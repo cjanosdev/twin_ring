@@ -1,0 +1,475 @@
+Think of :: syntax like "go into this module and look inside it"
+simialr to . in Python/Javascript but Rust
+seaprates types/modules with :: from values/methods with just (.)
+
+actix_web::App says look intot he actix_web crate, find item App.
+
+App::new() call the associate function new on type App
+
+:: = module/type navigation
+. = method/property naviation on a values
+
+
+use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+
+braces is used for grouping so you don't repeat use actix_wb:: five times
+
+
+use actix_web::App;
+use actix_web::HttpResponse;
+use actix_web::HttpServer;
+use actix_web::Responder;
+use actix_web::web;
+
+
+imports bring things into scope with use
+
+
+exports mark tihngs so they can be seen from outside yoru crate.
+
+
+example:
+
+
+// in lib.rs
+pub fn greet() {
+    println!("hi");
+}
+
+// in another file
+use mycrate::greet;
+
+
+without pub. a function/struct is private to its module
+with pub its visible to other modules/crates
+
+so pub = export
+use = import
+
+
+
+Command-line args using import "Clap"
+
+
+/// CLI args
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
+
+
+
+"/// CLI args" - This is a document comment (starts with ///).
+Doc comments become part of Rust's generated documentation (cargo doc).
+
+
+
+#[derive(Parser, Debug)]
+- Attributes in #[...] tell the complier to apply macros/metadata.
+derive = "auto-generate some code for me."
+Parser comes from 'clap' it generates code so Args can be filled from command-line flags
+Debug is a standard Rust trait - it augo generates a fmt::Debug implementation so you can println!("{:?}", args) for debugging
+
+So in english
+/// CLI args
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
+
+
+all this is doing is making a struct that is usable as a clap parser and also printable for debugging.
+
+
+Struct Args {...} defines a new struct named Args.
+A struct is like a class without methods - just named fields.
+
+#[arg(long, default_value_t = 8080)]
+
+This is a Clap-specific attribute on the port field.
+long means --port will be the flag name.
+default_value_t = 8080 means if no flag is passed, use 8080
+
+
+port: u16
+the field name is port
+Type is u16 (unsigned 16-bit integer, fits typical port numbers).
+
+So 
+/// CLI args
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
+
+the whole block means we expect a CLI flag --port (default 8080) and we
+will store it as a u16 in Args
+
+2. Async handler function
+
+async fn hello() -> impl Responder {
+    HttpResponse::Ok().body("TwinRing node is alive!)
+}
+
+async fn
+- declares an asynchronous function
+- means it returns a future that can be .awaited later
+- Required Actix handlers (they run in async runtime)
+
+
+hello() -> impl Responder
+- Return type is impl Responder
+- impl Trait means "this function returns some type that implments the Responder trait"
+
+- Responder is a trait from Actix: anything taht can be turned into an HTTP response (like a String, or full HttpResponse).
+
+So the whole thing says this function asynchronously returns something that can be turned into an HTTP response."
+
+HttpResponse::Ok().body("TwinRing node alive!")
+
+HttpResponse::Ok() = construct a response with status 200 OK.
+
+.body("...") = attach the response body.
+
+Returns an HttpResponse, which implements Responder.
+
+
+3. The main function
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let args = Args::parse();
+
+    println!("TwinRing node starting on port{}", args.port);
+
+    HttpServer::new(|| {
+        App::new()
+        .route("/", web::get().to(hello))
+    })
+    .bind(("0.0.0.0", args.port))?
+    .run()
+    .await
+}
+
+#[actix_web::main]
+
+- This is a macro attribute provided by Actix.
+- It transforms your main into an async entry point, setting up a Tokio runtime under the hood
+- Without this, Rust doesn't let you write async fn main directly.
+
+
+async fn main() -> std::io::Result<()>
+- defines the programs entry point
+- async fn returns a Future (so Actix can .await everything).
+Return type std::io::Result<()>
+- Result <T, E> is Rust's success/failure type
+- Here, success = (), the empty tuple (no real  value).
+- Failure = std::io::Error
+
+So main runs asynchronously and may return an I/O error.
+
+
+let args = Args::parse();
+
+- Clap generates a .parse() function for your struct.
+This reads command-line args and fills in Args.
+Example: --port 9090 would set args.port = 9090
+
+println!("...{}", args.port);
+- Macro for printing to stdout.
+"{}" is a placeholder, filled by args.port
+
+
+4. Building the HTTP server
+
+HttpServer::new(|| {
+    App::new()
+    .route("/", web::get().to(hello))
+})
+.bind(("0.0.0.0", args.port))?
+.run()
+.await
+
+
+- HttpServer::new(...) make a new server.
+- Takes a closer (|| {...}) that builds the app.
+    - App::new() -> creates an Actix app
+    - .route("/", web::get().to(hello)) -> registers a GET handler for / that calls hello.
+
+
+
+.bind(("0.0.0.0", args.port)) ? 
+This binds the server to all intefaces on the given port
+? operator = shorthand for error porpagation
+
+if .bind() fails (port is in use) it reutrns and Err, and ? bubbles that error
+out of main
+if success ? unwraps the value and continues
+
+.run().await
+.run() starts the server as an async Takes
+.await watis for it (never compeltes unless server shtus down).
+
+In Rust, errors are not exceptions - they're explicit values
+
+enum Result<T, E> {
+    OK(T), // success holds a value of type T
+    Err(E), // failure,holds an error of type E
+}
+
+Result<T, E> is a generic enum
+
+Exmaple: Result<String, io::Error> means "either a String (success) or an I/O error (failure)."
+
+
+fn might_fail(divisor: i32) -> Result<i32, String> {
+    if divisor == 0 {
+        Err("Division by zero".into())
+    } else {
+        Ok(10 / divisor)
+    }
+}
+
+fn main() {
+    match might_fail(0) {
+        Ok(val) => println!("Got value: {}", val),
+        Err(e)  => println!("Error: {}", e),
+    }
+}
+
+
+A macro is Rust's way of generating code at complile time.
+- Functions work on values
+- Macros work on syntax (code itself)
+
+
+exmaple println!("Hello {}", "world");
+
+println! is not a formal function - its a macro
+it takes yoru format string and arguments, and expands into code that
+handles formatting, error-checking, and printing
+
+
+Macros always end with ! wehn called:
+
+println!, vec!, format!.
+
+
+Derive macros
+
+#[derive(Debug)] is a macro that genrates code for the Debug trait so
+you don't have to write it by handler
+
+Macros = "meta-functions" that expand into rust code before compilation.
+You can use them when you need flexible or repetitive code generation.
+
+
+CLOSURES:
+A closure is an anonymous function - like a lambda in Python/Java or a delegate in C#.
+
+
+general form:
+let add = |x: i32, y: i32| x + y;
+println!("{}", add (2,3)); // 5
+
+| x, y| declares parameters (instead of (x, y) like a normal fn).
+Body can be an expresion (x + y ) or a block {...}
+
+so with 
+HttpServer::new(|| {
+    App::new()
+        .route("/", web::get().to(hello))
+})
+
+|| is no parameters (empty pipes)
+
+Why a closure for this?
+
+HttpServer::new needs a factory: each thread that runs the server should
+get its own fresh App.
+By giving it a closure, Actix can all this closure multiple times to build multiple App instances
+
+The ? operator in Rust is error propogation
+
+fn read_file() -> Result<String, io::Error> {
+    let mut f = File::open("foo.txt");
+    if f.is_err() {
+        return Err(f.unwrap_err());
+    }
+    let mut file = f.unwrap();
+
+    let mut s = String::new();
+    let res = file.read_to_string(&mut s);
+    if res.is_err() {
+        return Err(res.unwrap_err());
+    }
+    Ok(s)
+}
+
+with ? operator
+
+fn read_file() -> Result<String, io::Error> {
+    let mut s = String::new();
+    File::open("foo.txt")?.read_to_string(&mut s)?;
+    Ok(s)
+}
+
+Why println is a macro println!
+
+for example: println!("Hello {}", name);
+
+this is not a single function call. The println! macro expands into:
+
+{
+    use std::io::Write;
+    let mut handle = ::std::io::stdout();
+    writeln!(&mut handle, "Hello {}", name).unwrap();
+}
+
+unwrap()
+
+.unwrap() means "If this is Ok, give me the value inside. IF it's Err, crash the program (panic)."
+
+example:
+
+let x = Some(5);
+println!("{}", x.unwrap()); //prints 5
+
+let y: Option<i32> = None;
+println!("{}", y.unwrap()); // panic at runtime
+
+unwrap = take the inside value or blow up
+
+
+In Rust, unwrap() is a method available on Option and Result enums. Its purpose is to extract the contained value from a Some variant of an Option or an Ok variant of a Result.
+How unwrap() works:
+For Option<T>: If the Option is Some(value), unwrap() returns value. If the Option is None, unwrap() causes the program to panic!.
+For Result<T, E>: If the Result is Ok(value), unwrap() returns value. If the Result is Err(error), unwrap() causes the program to panic!.
+
+
+
+The ? operator is like a safe version of unwrap that propagates errors
+
+if the result is Ok(val) it unwraps and gives you val
+if the result is Err(e) it returs early from the current function with that error
+
+example:
+fn read_file() -> Result<String, std::io::Error> {
+    let mut s = String::new();
+    let mut f = File::open("foo.txt")?;  // if Err -> return Err
+    f.read_to_string(&mut s)?;           // if Err -> return Err
+    Ok(s)
+}
+
+
+so back to:
+with ? operator
+
+fn read_file() -> Result<String, io::Error> {
+    let mut s = String::new();
+    File::open("foo.txt")?.read_to_string(&mut s)?;
+    Ok(s)
+}
+
+
+So why don’t we need f.is_err() checks?
+
+Because ? does that implicitly. It’s sugar for:
+
+match File::open("foo.txt") {
+    Ok(val) => val,
+    Err(e)  => return Err(e),
+}
+
+
+If println were a function, you’d need a version for each number/type of arguments:
+
+println("Hello");  
+println("Hello {}", name);  
+println("x={}, y={}", x, y);  
+
+
+In C, this is handled by varargs (printf), but varargs are unsafe — the compiler can’t check types, so mismatches cause runtime bugs. Rust doesn’t allow unsafe implicit varargs like C.
+
+
+println! is a macro (not a function) because:
+
+Rust doesn’t support unsafe C-style varargs.
+
+Macros can validate arguments at compile time.
+
+It’s really shorthand for a bunch of lower-level code.
+
+So it’s not an “odd choice” — it’s a deliberate tradeoff:
+
+Safety + flexibility (macros) over simplicity but unsafe (functions).
+
+
+It looks like double parens, but actually:
+
+The inner parens ( "0.0.0.0", args.port ) are creating a tuple.
+
+The outer parens are just normal function call syntax: .bind( … ).
+
+So it’s not really double — it’s:
+
+bind( (host, port) )
+
+
+“Call bind with one argument, that argument being a tuple of host+port.”
+
+4. Alternative forms
+
+Both are valid:
+
+.bind(("0.0.0.0", 8080))   // tuple form
+.bind("0.0.0.0:8080")      // string form
+
+
+fn bind<A: ToSocketAddrs>(self, addr: A) -> std::io::Result<Self>
+1. Function name and generics
+rust
+Copy code
+fn bind<A: ToSocketAddrs>
+fn bind = function named bind.
+
+<A: ToSocketAddrs> = generic type parameter:
+
+A is a placeholder type.
+
+It must implement the trait ToSocketAddrs.
+
+So this means: “bind takes an argument of some type A, as long as A implements the ToSocketAddrs trait.”
+
+
+(self, addr: A)
+In Rust, self is like this in other languages.
+
+It means this is a method defined on a type (here, HttpServer).
+
+self by value means it takes ownership of the server instance.
+
+So .bind(...) consumes the old HttpServer and returns a new one.
+
+That’s why you can chain methods (.bind(...).run()).
+
+
+Other forms:
+
+&self → borrow immutably.
+
+&mut self → borrow mutably.
+
+self → take ownership.
+
+
+-> std::io::Result<Self>
+Return type is std::io::Result<Self>.
+
+Result<T, E> = success/failure type (we discussed).
+
+Here, T = Self (the same type the method is defined on, i.e., HttpServer).
+
+E = std::io::Error (because Result defaults to Result<T, std::io::Error> when you use std::io::Result).

@@ -1,0 +1,24 @@
+cargo run -p twinring-node -- --port 8081
+
+
+-p = package selector.
+
+In a workspace (like yours), there may be multiple crates (e.g., twinring-node, twinring-core, later more).
+
+cargo run -p twinring-node tells Cargo:
+
+“Run the binary crate named twinring-node inside this workspace.”
+
+If you leave off -p, Cargo will try to run the default binary (sometimes ambiguous in a workspace).
+
+🔹 2. The --
+
+Double dash -- is a separator between arguments meant for Cargo and arguments meant for your program.
+
+Everything before -- is for Cargo.
+
+Everything after -- gets passed untouched to your binary’s main.
+
+🔹 3. The --port 8081
+
+This is your program’s argument, parsed by Clap.
