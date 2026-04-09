@@ -33,9 +33,9 @@ use twin_ring_core::experiment_path::results_path;
 // ============================================================
 
 const NODES: &[&str] = &[
-    "http://localhost:8001",
-    "http://localhost:8002",
-    "http://localhost:8003",
+    "http://localhost:8001",  // owns shard 0
+    "http://localhost:8002",  // owns shard 1
+    "http://localhost:8003",  // owns shard 2
 ];
 
 const KEY_SPACE: u32   = 100_000;
@@ -60,18 +60,37 @@ const BASELINE_JSON: &str = "experiment_results/baseline.json";
 
 
 // ============================================================
-// Key-based routing — must match simple_metastable
+// Shard-based routing — must match simple_metastable
 // ============================================================
 
-/// Failover order for each virtual slot (key % 6).
-const FAILOVER_ORDER: [[usize; 3]; 6] = [
-    [0, 1, 2], // slot 0: node1 → node2 → node3
-    [1, 2, 0], // slot 1: node2 → node3 → node1
-    [2, 0, 1], // slot 2: node3 → node1 → node2
-    [0, 2, 1], // slot 3: node1 → node3 → node2
-    [1, 0, 2], // slot 4: node2 → node1 → node3
-    [2, 1, 0], // slot 5: node3 → node2 → node1
-];
+/// Each worker's home shard is interleaved: worker 0→shard0, 1→shard1, 2→shard2, 3→shard0...
+/// This ensures all 3 nodes warm evenly from the first ramp step.
+fn home_shard(worker_id: usize) -> usize {
+    worker_id % NODES.len()
+}
+
+/// Key range for a given shard.
+fn shard_range(shard: usize) -> (u32, u32) {
+    let size = KEY_SPACE / NODES.len() as u32;
+    let start = shard as u32 * size;
+    let end = if shard == NODES.len() - 1 {
+        KEY_SPACE
+    } else {
+        start + size
+    };
+    (start, end)
+}
+
+/// Zipfian key selection within a shard: 80% of requests hit hottest 20% of keys.
+fn zipf_key(shard: usize, rng: &mut ChaCha8Rng) -> u32 {
+    let (start, end) = shard_range(shard);
+    let hot_end = start + (end - start) / 5;
+    if rng.random::<f64>() < 0.8 {
+        rng.random_range(start..hot_end.max(start + 1))
+    } else {
+        rng.random_range(hot_end..end)
+    }
+}
 
 
 // ============================================================
@@ -86,22 +105,16 @@ fn spawn_worker(
 ) {
     tokio::spawn(async move {
         let mut rng = ChaCha8Rng::seed_from_u64(worker_id as u64);
+        let shard = home_shard(worker_id);
         loop {
             if worker_id >= active_ceiling.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
-            // Zipfian over full keyspace: 80% of requests hit hottest 20% of keys.
-            let hot_end = (KEY_SPACE / 5).max(1);
-            let k: u32 = if rng.random::<f64>() < 0.8 {
-                rng.random_range(0..hot_end)
-            } else {
-                rng.random_range(hot_end..KEY_SPACE)
-            };
-            let slot = (k % 6) as usize;
-            let order = FAILOVER_ORDER[slot];
+            let k = zipf_key(shard, &mut rng);
             for attempt in 0..NODES.len() {
-                let url = format!("{}/get/key{}", nodes[order[attempt]], k);
+                let node_idx = (shard + attempt) % NODES.len();
+                let url = format!("{}/get/key{}", nodes[node_idx], k);
                 match client.get(&url).send().await {
                     Ok(_)  => break,
                     Err(_) => {}

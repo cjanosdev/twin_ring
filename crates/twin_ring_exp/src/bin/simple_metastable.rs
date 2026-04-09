@@ -7,30 +7,23 @@
 //!
 //! # The scenario
 //!
-//! Key-based routing with 6-slot split failover.
+//! Three cache nodes each own one shard of the keyspace (consistent hashing).
+//! Workers are sticky to their shard's home node.
 //!
-//! Each key maps to one of 6 virtual slots via `key % 6`. The slot determines
-//! which node is primary and which nodes are tried on failover:
+//!   Shard 0 → node 1 (keys 0       .. 33_333)
+//!   Shard 1 → node 2 (keys 33_334  .. 66_666)
+//!   Shard 2 → node 3 (keys 66_667  .. 99_999)
 //!
-//!   slot 0 (key%6==0): node1 → node2 → node3
-//!   slot 1 (key%6==1): node2 → node3 → node1
-//!   slot 2 (key%6==2): node3 → node1 → node2
-//!   slot 3 (key%6==3): node1 → node3 → node2
-//!   slot 4 (key%6==4): node2 → node1 → node3
-//!   slot 5 (key%6==5): node3 → node2 → node1
+//! WARMUP: workers ramp from 15 → 150 gradually so Cassandra is not saturated
+//! during the initial cache fill. Hot Zipfian keys fill each shard's cache;
+//! hit rate climbs to ~95%+ and cache_p99 drops to sub-ms (hit latency).
 //!
-//! Node1 owns slots 0 and 3 (1/3 of keys). Node2 owns slots 1 and 4. Node3
-//! owns slots 2 and 5. All workers request keys from the full keyspace — the
-//! key itself determines routing, not the worker.
-//!
-//! WARMUP: workers ramp from 15 → 150 gradually. Each node warms its 1/3 of
-//! the keyspace. Hit rate climbs to ~95%+ on all three nodes.
-//!
-//! FAULT INJECT: node 1 is killed. Slot-0 keys fail over to node2; slot-3
-//! keys fail over to node3. Both nodes simultaneously absorb foreign keys they
-//! have never cached → 100% miss on those keys → Cassandra hammered from both
-//! sides. Load surges to fault_workers. Node 1 stays down for the full
-//! fault_down_secs so nodes 2 and 3 lose their own cached keys via TTL expiry.
+//! FAULT INJECT: node 1 is killed. Its workers (shard-0) fail over to nodes 2
+//! and 3 (round-robin). Nodes 2 and 3 have never cached any shard-0 keys, so
+//! every redirected request is a Cassandra miss. Load surges to fault_workers
+//! with all surge workers hitting shard-0 keys. The thundering herd overwhelms
+//! Cassandra. Node 1 stays down for the full fault_down_secs so nodes 2 and 3
+//! lose their warmth via TTL expiry.
 //!
 //! OBSERVE: node 1 restarts with a cold cache. Cassandra is already saturated,
 //! so node 1 cannot fill its cache fast enough. All three nodes see high
@@ -68,21 +61,9 @@ use twin_ring_exp::metrics::{MetricsWriter, NodeWindow, StatsPoller, run_phase};
 // ============================================================
 
 const NODES: &[&str] = &[
-    "http://localhost:8001",  // primary for key%6 ∈ {0, 3}
-    "http://localhost:8002",  // primary for key%6 ∈ {1, 4}
-    "http://localhost:8003",  // primary for key%6 ∈ {2, 5}
-];
-
-/// Failover order for each virtual slot (key % 6).
-/// Slot 0 and 3 both have node1 as primary but different failover targets,
-/// so when node1 is down its traffic splits evenly between node2 and node3.
-const FAILOVER_ORDER: [[usize; 3]; 6] = [
-    [0, 1, 2], // slot 0: node1 → node2 → node3
-    [1, 2, 0], // slot 1: node2 → node3 → node1
-    [2, 0, 1], // slot 2: node3 → node1 → node2
-    [0, 2, 1], // slot 3: node1 → node3 → node2
-    [1, 0, 2], // slot 4: node2 → node1 → node3
-    [2, 1, 0], // slot 5: node3 → node2 → node1
+    "http://localhost:8001",  // owns shard 0
+    "http://localhost:8002",  // owns shard 1
+    "http://localhost:8003",  // owns shard 2
 ];
 
 const CONTROL_API: &str = "http://localhost:9000";
@@ -93,6 +74,11 @@ const BASELINE_JSON: &str = "experiment_results/baseline.json";
 /// Read an env var, parse it as T, or return a default.
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Which shard a worker belongs to.
+fn home_shard(worker_id: usize) -> usize {
+    worker_id % NODES.len()
 }
 
 
@@ -199,33 +185,40 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Key-based routing worker. The key determines which node is primary and
-    // which nodes are tried on failover via FAILOVER_ORDER[key % 6].
-    // All workers — warmup and surge — are identical. More surge workers means
-    // more total Cassandra pressure when TTL-expired keys can't be refilled.
+    // Shard-sticky Zipfian worker. Failover only on Err (503 = alive but slow → stay sticky).
+    // forced_shard overrides the worker's natural shard — used during fault inject so all
+    // surge workers hit shard-0 keys that nodes 2/3 cannot serve from cache.
     let spawn_worker = move |worker_id: usize,
               client: Arc<Client>,
               nodes: Vec<String>,
-              active_ceiling: Arc<AtomicUsize>| {
+              active_ceiling: Arc<AtomicUsize>,
+              forced_shard: Option<usize>| {
             let ks = key_space;
             tokio::spawn(async move {
+                let shard = forced_shard.unwrap_or_else(|| home_shard(worker_id));
                 let mut rng = ChaCha8Rng::seed_from_u64(worker_id as u64);
                 loop {
                     if worker_id >= active_ceiling.load(Ordering::Relaxed) {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     }
-                    // Zipfian over full keyspace: 80% of requests hit hottest 20% of keys.
-                    let hot_end = (ks / 5).max(1);
-                    let k: u32 = if rng.random::<f64>() < 0.8 {
-                        rng.random_range(0..hot_end)
-                    } else {
-                        rng.random_range(hot_end..ks)
+                    // Inline zipf_key using captured key_space (ks).
+                    let (start, end) = {
+                        let size  = ks / NODES.len() as u32;
+                        let s     = (shard as u32) * size;
+                        let e     = if shard == NODES.len() - 1 { ks } else { s + size };
+                        (s, e)
                     };
-                    let slot = (k % 6) as usize;
-                    let order = FAILOVER_ORDER[slot];
+                    let hot_end = start + (end - start) / 5;
+                    let k: u32 = if rng.random::<f64>() < 0.8 {
+                        rng.random_range(start..hot_end.max(start + 1))
+                    } else {
+                        rng.random_range(hot_end..end)
+                    };
+                    let key = format!("key{}", k);
                     for attempt in 0..NODES.len() {
-                        let url = format!("{}/get/key{}", nodes[order[attempt]], k);
+                        let node_idx = (shard + attempt) % NODES.len();
+                        let url = format!("{}/get/{}", nodes[node_idx], key);
                         match client.get(&url).send().await {
                             Ok(_)  => break,
                             Err(_) => {}
@@ -237,16 +230,13 @@ async fn main() -> Result<()> {
     };
 
     // ── Phase 1: WARMUP ──────────────────────────────────────────────────────
-    // Gradual ramp so Cassandra is not overwhelmed during cache fill.
-    // Hot Zipfian keys fill quickly → hit_rate climbs to ~95%+ → cache_p99 drops
-    // to sub-ms hit latency. This is the healthy-system state.
     println!("\n⏳ [warmup] {warmup_secs}s — ramping {warmup_start_workers}→{num_workers} workers...");
     println!("   Expect: hit_rate → ~95%+, cache_p99 → sub-ms");
 
     let active_ceiling = Arc::new(AtomicUsize::new(warmup_start_workers));
 
     for worker_id in 0..num_workers {
-        spawn_worker(worker_id, client.clone(), nodes.clone(), active_ceiling.clone());
+        spawn_worker(worker_id, client.clone(), nodes.clone(), active_ceiling.clone(), None);
     }
 
     {
@@ -268,13 +258,13 @@ async fn main() -> Result<()> {
     // ── Phase 2: FAULT_INJECT ────────────────────────────────────────────────
     phase_tx.send(Phase::FaultInject).ok();
     println!("\n💥 [fault_inject] Killing node 1...");
-    println!("   Slot-0 keys fail over to node2, slot-3 keys fail over to node3 — 100% miss on both.");
-    println!("   Surging load to {fault_workers} workers while Cassandra absorbs the spike.");
+    println!("   Shard-0 workers redirect to nodes 2/3 — 100% miss on shard-0 keys.");
+    println!("   Surging load to {fault_workers} workers (all hitting shard-0) while Cassandra absorbs the spike.");
     let fault_start = tokio::time::Instant::now();
     node_kill("1", &control_client).await;
 
     for worker_id in num_workers..fault_workers {
-        spawn_worker(worker_id, client.clone(), nodes.clone(), active_ceiling.clone());
+        spawn_worker(worker_id, client.clone(), nodes.clone(), active_ceiling.clone(), Some(0));
     }
     {
         let ceiling = active_ceiling.clone();
