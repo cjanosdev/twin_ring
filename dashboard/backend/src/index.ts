@@ -11,7 +11,7 @@ import {
   getRegistry,
 } from "./experimentRunner";
 import { watchCsv } from "./csvWatcher";
-import { ExperimentParams, ExperimentStep, NoCacheRow, RunInfo, RunType, SequenceRequest } from "./types";
+import { CsvRow, ExperimentParams, ExperimentStep, NoCacheRow, RunInfo, RunType, SequenceRequest } from "./types";
 import { getInfraStatus, runInit, runInitClean, runUp, runDown } from "./infraRunner";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../..");
@@ -71,7 +71,7 @@ app.get<{ Querystring: { path: string } }>("/api/runs/data", async (request, rep
     return reply.code(404).send({ error: "file not found" });
   }
   const content = fs.readFileSync(resolved, "utf8");
-  const records = parse(content, { columns: true, skip_empty_lines: true, cast: true });
+  const records: CsvRow[] = parse(content, { columns: true, skip_empty_lines: true, cast: true });
 
   for (const row of records) {
     const portMatch = String(row.node).match(/:(\d+)$/);
