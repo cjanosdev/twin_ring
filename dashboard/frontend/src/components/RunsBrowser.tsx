@@ -1,11 +1,41 @@
 import { useEffect, useState } from "react";
-import { RunInfo, CsvRow } from "../types";
-import { apiListRuns, apiGetRunData } from "../api";
+import { RunInfo, RunType, CsvRow, NoCacheRow } from "../types";
+import { apiListRuns, apiGetRunData, apiGetNoCacheData } from "../api";
+
+export type LoadedRun =
+  | { type: "metastable"; rows: CsvRow[]; startMs: number | null }
+  | { type: "baseline_warmup" | "baseline_steady"; rows: CsvRow[]; startMs: number | null }
+  | { type: "baseline_no_cache"; rows: NoCacheRow[] };
 
 interface Props {
-  onLoadRun: (rows: CsvRow[], startMs: number | null) => void;
+  onLoadRun: (run: LoadedRun) => void;
   liveRunning: boolean;
 }
+
+const RUN_TYPE_LABEL: Record<RunType, string> = {
+  metastable:        "Metastable",
+  baseline_warmup:   "Baseline Warmup",
+  baseline_steady:   "Baseline Steady",
+  baseline_no_cache: "No-Cache Baseline",
+  unknown:           "Other",
+};
+
+const RUN_TYPE_COLOR: Record<RunType, string> = {
+  metastable:        "#ef4444",
+  baseline_warmup:   "#3b82f6",
+  baseline_steady:   "#4ade80",
+  baseline_no_cache: "#fb923c",
+  unknown:           "#64748b",
+};
+
+// Display order for groups
+const TYPE_ORDER: RunType[] = [
+  "metastable",
+  "baseline_steady",
+  "baseline_warmup",
+  "baseline_no_cache",
+  "unknown",
+];
 
 export function RunsBrowser({ onLoadRun, liveRunning }: Props) {
   const [runs, setRuns] = useState<RunInfo[]>([]);
@@ -26,14 +56,24 @@ export function RunsBrowser({ onLoadRun, liveRunning }: Props) {
     return () => clearInterval(id);
   }, []);
 
-  const handleSelect = async (path: string) => {
+  const handleSelect = async (run: RunInfo) => {
     if (liveRunning) return;
-    setSelected(path);
+    setSelected(run.path);
     setLoading(true);
     try {
-      const rows = await apiGetRunData(path);
-      const startMs = rows.length > 0 ? rows[0].timestamp_ms : null;
-      onLoadRun(rows, startMs);
+      if (run.run_type === "baseline_no_cache") {
+        const rows = await apiGetNoCacheData(run.path);
+        onLoadRun({ type: "baseline_no_cache", rows });
+      } else if (run.run_type === "baseline_warmup" || run.run_type === "baseline_steady") {
+        const rows = await apiGetRunData(run.path);
+        const startMs = rows.length > 0 ? rows[0].timestamp_ms : null;
+        onLoadRun({ type: run.run_type, rows, startMs });
+      } else {
+        // metastable or unknown — treat as metastable
+        const rows = await apiGetRunData(run.path);
+        const startMs = rows.length > 0 ? rows[0].timestamp_ms : null;
+        onLoadRun({ type: "metastable", rows, startMs });
+      }
     } catch (e) {
       console.error("Failed to load run:", e);
     } finally {
@@ -41,11 +81,12 @@ export function RunsBrowser({ onLoadRun, liveRunning }: Props) {
     }
   };
 
-  const groupedByDate = runs.reduce<Record<string, RunInfo[]>>((acc, run) => {
-    if (!acc[run.date]) acc[run.date] = [];
-    acc[run.date].push(run);
+  // Group by run_type, then within each group by date
+  const byType = runs.reduce<Record<RunType, RunInfo[]>>((acc, run) => {
+    if (!acc[run.run_type]) acc[run.run_type] = [];
+    acc[run.run_type].push(run);
     return acc;
-  }, {});
+  }, {} as Record<RunType, RunInfo[]>);
 
   return (
     <div style={containerStyle}>
@@ -59,19 +100,21 @@ export function RunsBrowser({ onLoadRun, liveRunning }: Props) {
         <div style={{ fontSize: 11, color: "#475569" }}>No past runs found.</div>
       ) : (
         <div style={{ overflowY: "auto", flex: 1 }}>
-          {Object.entries(groupedByDate).map(([date, dateRuns]) => (
-            <div key={date} style={{ marginBottom: 10 }}>
-              <div style={dateHeaderStyle}>{date}</div>
-              {dateRuns.map((run) => (
+          {TYPE_ORDER.filter((t) => byType[t]?.length > 0).map((runType) => (
+            <div key={runType} style={{ marginBottom: 12 }}>
+              <div style={{ ...typeHeaderStyle, color: RUN_TYPE_COLOR[runType] }}>
+                {RUN_TYPE_LABEL[runType]}
+              </div>
+              {byType[runType].map((run) => (
                 <button
                   key={run.path}
-                  onClick={() => handleSelect(run.path)}
+                  onClick={() => handleSelect(run)}
                   disabled={liveRunning || loading}
-                  style={runBtnStyle(selected === run.path, liveRunning)}
+                  style={runBtnStyle(selected === run.path, liveRunning, RUN_TYPE_COLOR[run.run_type])}
                 >
                   <div style={{ fontWeight: 600, fontSize: 10 }}>{run.filename}</div>
                   <div style={{ fontSize: 9, color: "#64748b", marginTop: 1 }}>
-                    {(run.size_bytes / 1024).toFixed(1)} KB
+                    {run.date} · {(run.size_bytes / 1024).toFixed(1)} KB
                   </div>
                 </button>
               ))}
@@ -102,25 +145,24 @@ const titleStyle: React.CSSProperties = {
   flexShrink: 0,
 };
 
-const dateHeaderStyle: React.CSSProperties = {
+const typeHeaderStyle: React.CSSProperties = {
   fontSize: 10,
-  color: "#475569",
-  fontWeight: 600,
+  fontWeight: 700,
   marginBottom: 4,
-  textTransform: "uppercase",
   letterSpacing: 0.5,
+  textTransform: "uppercase",
 };
 
-const runBtnStyle = (selected: boolean, disabled: boolean): React.CSSProperties => ({
+const runBtnStyle = (selected: boolean, disabled: boolean, accentColor: string): React.CSSProperties => ({
   width: "100%",
   textAlign: "left",
-  background: selected ? "#1d4ed8" : "#1e293b",
-  border: `1px solid ${selected ? "#3b82f6" : "#334155"}`,
+  background: selected ? "#1e293b" : "transparent",
+  border: `1px solid ${selected ? accentColor : "#1e293b"}`,
   borderRadius: 5,
   color: "#e2e8f0",
   padding: "6px 8px",
   cursor: disabled ? "not-allowed" : "pointer",
   marginBottom: 4,
   opacity: disabled ? 0.5 : 1,
-  transition: "background 0.2s",
+  transition: "border-color 0.15s",
 });
