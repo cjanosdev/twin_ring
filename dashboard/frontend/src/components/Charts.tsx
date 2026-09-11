@@ -1,3 +1,4 @@
+import { useRef, useCallback } from "react";
 import {
   LineChart,
   Line,
@@ -10,6 +11,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { CsvRow, NODE_COLORS, PHASE_COLORS } from "../types";
+import { downloadChartPng, downloadAllCharts } from "../chartDownload";
 
 interface Props {
   rows: CsvRow[];
@@ -85,7 +87,7 @@ interface PanelConfig {
   title: string;
   getValue: (row: CsvRow) => number;
   unit: string;
-  yDomain?: [number | "auto", number | "auto"];
+  yDomain?: [number | "auto", number | "auto" | ((dataMax: number) => number)];
   logScale?: boolean;
   formatY?: (v: number) => string;
 }
@@ -125,11 +127,26 @@ const PANELS: PanelConfig[] = [
     title: "DB Errors",
     getValue: (r) => r.db_errors,
     unit: "count",
-    yDomain: [0, "auto"],
+    yDomain: [0, (dataMax: number) => Math.max(dataMax, 4)],
   },
 ];
 
 export function Charts({ rows, experimentStartMs }: Props) {
+  // One stable ref per panel — created once, never change order (PANELS is module-level const)
+  const chartRefs = useRef<Array<React.RefObject<HTMLDivElement | null>>>(
+    PANELS.map(() => ({ current: null }))
+  );
+
+  const handleDownloadAll = useCallback(async () => {
+    await downloadAllCharts(
+      PANELS.map((p, i) => ({
+        ref: chartRefs.current[i],
+        name: p.title.toLowerCase().replace(/ /g, "_"),
+      })),
+      "metastable"
+    );
+  }, []);
+
   if (rows.length === 0) {
     return (
       <div style={emptyStyle}>
@@ -141,10 +158,21 @@ export function Charts({ rows, experimentStartMs }: Props) {
   }
 
   return (
-    <div style={gridStyle}>
-      {PANELS.map((panel) => (
-        <ChartPanel key={panel.title} panel={panel} rows={rows} startMs={experimentStartMs} />
-      ))}
+    <div>
+      <div style={toolbarStyle}>
+        <button style={dlAllBtnStyle} onClick={handleDownloadAll}>↓ Download All</button>
+      </div>
+      <div style={gridStyle}>
+        {PANELS.map((panel, i) => (
+          <ChartPanel
+            key={panel.title}
+            panel={panel}
+            rows={rows}
+            startMs={experimentStartMs}
+            chartRef={chartRefs.current[i]}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -153,22 +181,33 @@ function ChartPanel({
   panel,
   rows,
   startMs,
+  chartRef,
 }: {
   panel: PanelConfig;
   rows: CsvRow[];
   startMs: number | null;
+  chartRef: React.MutableRefObject<HTMLDivElement | null>;
 }) {
   const { data, transitions } = buildChartData(rows, startMs, panel.getValue);
   const nodes = ["node1", "node2", "node3"];
 
   return (
     <div style={panelStyle}>
-      <div style={panelTitleStyle}>
-        {panel.title}
-        <span style={{ color: "#64748b", fontWeight: 400, fontSize: 10, marginLeft: 6 }}>
-          ({panel.unit})
-        </span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={panelTitleStyle}>
+          {panel.title}
+          <span style={{ color: "#64748b", fontWeight: 400, fontSize: 10, marginLeft: 6 }}>
+            ({panel.unit})
+          </span>
+        </div>
+        <button
+          style={dlBtnStyle}
+          onClick={() => downloadChartPng(chartRef, `metastable_${panel.title.toLowerCase().replace(/ /g, "_")}`)}
+        >
+          ↓ PNG
+        </button>
       </div>
+      <div ref={chartRef} style={{ background: "#0f172a" }}>
       <ResponsiveContainer width="100%" height={160}>
         <LineChart data={data} margin={{ top: 4, right: 8, left: -12, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -227,15 +266,30 @@ function ChartPanel({
               stroke={NODE_COLORS[nodeId]}
               strokeWidth={2}
               dot={false}
-              connectNulls={false}
+              connectNulls={true}
               isAnimationActive={false}
             />
           ))}
         </LineChart>
       </ResponsiveContainer>
+      </div>
     </div>
   );
 }
+
+const toolbarStyle: React.CSSProperties = {
+  display: "flex", justifyContent: "flex-end", marginBottom: 6,
+};
+
+const dlAllBtnStyle: React.CSSProperties = {
+  fontSize: 10, color: "#e2e8f0", background: "#1e293b", border: "1px solid #334155",
+  borderRadius: 4, padding: "3px 12px", cursor: "pointer", fontWeight: 600,
+};
+
+const dlBtnStyle: React.CSSProperties = {
+  fontSize: 10, color: "#60a5fa", background: "transparent", border: "1px solid #1e293b",
+  borderRadius: 4, padding: "2px 8px", cursor: "pointer", flexShrink: 0,
+};
 
 const gridStyle: React.CSSProperties = {
   display: "grid",
@@ -254,7 +308,6 @@ const panelTitleStyle: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 600,
   color: "#94a3b8",
-  marginBottom: 6,
   letterSpacing: 0.5,
 };
 

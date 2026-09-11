@@ -7,3 +7,5 @@ __pycache__/
 .idea/
 node_modules/
 experiment_results/runs/
+/CLAUDE.md
+/AGENTS.md

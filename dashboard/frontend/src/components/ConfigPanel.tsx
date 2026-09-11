@@ -6,6 +6,8 @@ interface Props {
   running: boolean;
   onStart: () => void;
   onStop: () => void;
+  /** Whether all 3 cache nodes are currently reachable — undefined/true when unknown. */
+  nodesUp?: boolean;
 }
 
 // ── Run modes ─────────────────────────────────────────────────────────────────
@@ -20,10 +22,13 @@ interface RunMode {
 // Default modes shown in the selector. Built from the known experiment IDs.
 // When new experiments are added to the registry, they auto-appear in the
 // "Single experiment" section; users can combine them however they want.
+// Each experiment computes its own baseline inline from the regular-work tail, so
+// there is no separate baseline step to sequence ahead of it.
 const DEFAULT_MODES: RunMode[] = [
-  { id: "baseline+metastable", label: "Baseline → Metastable (default)", steps: ["baseline", "simple_metastable"] },
-  { id: "baseline_only",       label: "Baseline only",                   steps: ["baseline"] },
-  { id: "metastable_only",     label: "Metastable only",                 steps: ["simple_metastable"] },
+  { id: "lru_only",    label: "LRU — Overload (control)",        steps: ["exp_lru"] },
+  { id: "lru_outage", label: "LRU — Overload + Node Outage (control)", steps: ["exp_lru_outage"] },
+  { id: "all_five",    label: "All strategies",       steps: ["exp_lru", "exp_dual", "exp_ttl", "exp_leased", "exp_combined"] },
+  { id: "lru_vs_dual", label: "LRU vs Dual-Ring",     steps: ["exp_lru", "exp_dual"] },
 ];
 
 // ── Param metadata ────────────────────────────────────────────────────────────
@@ -33,7 +38,7 @@ const PARAM_META: Record<keyof ExperimentParams, { label: string; description: s
   key_space:                      { label: "Key Space",              description: "Total number of keys" },
   workers_per_shard:              { label: "Workers/Shard",          description: "Workers per shard (total = ×3)" },
   poll_interval_secs:             { label: "Poll Interval (s)",      description: "Metrics collection interval" },
-  request_timeout_ms:             { label: "Request Timeout (ms)",   description: "Worker HTTP timeout (>800ms Cass timeout)" },
+  request_timeout_ms:             { label: "Request Timeout (ms)",   description: "HTTP attempt timeout; timeouts count as failed reads" },
   // Baseline
   baseline_warmup_secs:           { label: "Warmup Duration (s)",    description: "Total baseline warmup duration" },
   baseline_warmup_start_workers:  { label: "Warmup Start Workers",   description: "Initial worker count during ramp" },
@@ -41,6 +46,22 @@ const PARAM_META: Record<keyof ExperimentParams, { label: string; description: s
   baseline_warmup_ramp_step_secs: { label: "Warmup Ramp Step (s)",   description: "Interval between ramp steps" },
   baseline_steady_secs:           { label: "Steady Duration (s)",    description: "Steady-state measurement window" },
   // Metastable
+  regular_rps:                    { label: "Regular Rate (req/s)",   description: "Requests offered each second before overload and during recovery" },
+  overload_rps:                   { label: "Overload Rate (req/s)",  description: "Peak requests offered each second during overload and node outage" },
+  max_in_flight:                  { label: "Max In Flight",          description: "Safety bound; excess offered requests are recorded as shed demand" },
+  baseline_offered_rps_tolerance: { label: "Rate Tolerance",         description: "Allowed fractional deviation between configured and measured baseline offered rate" },
+  warmup_start_rps:               { label: "Warmup Start (req/s)",   description: "Initial offered request rate during cache warmup" },
+  warmup_ramp_step_rps:           { label: "Warmup Step (req/s)",    description: "Offered rate added per warmup ramp interval" },
+  overload_ramp_step_rps:         { label: "Overload Step (req/s)",  description: "Offered rate added per overload ramp interval" },
+  regular_workers:               { label: "Regular Workers",        description: "Total workers before overload and during recovery" },
+  regular_work_secs:             { label: "Regular Work (s)",        description: "Hold regular load and measure the baseline before overload" },
+  baseline_window_secs:          { label: "Baseline Tail (s)",       description: "Complete regular-work tail used to establish the recovery reference" },
+  overload_workers:              { label: "Overload Workers",       description: "Peak workers during overload and while the selected node is down" },
+  overload_secs:                 { label: "Overload Duration (s)",   description: "Elevated-load phase before any node outage, including its ramp" },
+  outage_secs:                   { label: "Node Down Duration (s)", description: "Keep the selected node down under elevated load; then restore regular load before restart (default 60)" },
+  outage_node:                   { label: "Node to Stop", description: "Cache node 1, 2, or 3 (default 1)" },
+  overload_ramp_step:            { label: "Overload Ramp Step",      description: "Workers added per overload ramp interval" },
+  overload_ramp_step_secs:       { label: "Overload Ramp Step (s)",   description: "Interval between overload ramp steps" },
   warmup_secs:                    { label: "Warmup Duration (s)",    description: "Total warmup phase duration" },
   warmup_start_workers:           { label: "Warmup Start Workers",   description: "Initial worker count during ramp" },
   warmup_ramp_step:               { label: "Warmup Ramp Step",       description: "Workers added per ramp interval" },
@@ -54,7 +75,37 @@ const PARAM_META: Record<keyof ExperimentParams, { label: string; description: s
 };
 
 // Default values per experiment (only the params that experiment owns)
+const FIXED_RATE_DEFAULTS: Partial<ExperimentParams> = {
+  key_space: 100_000,
+  regular_rps: 7_000,
+  overload_rps: 20_000,
+  max_in_flight: 12_000,
+  baseline_offered_rps_tolerance: 0.05,
+  poll_interval_secs: 5,
+  request_timeout_ms: 500,
+  warmup_secs: 90,
+  warmup_start_rps: 1_000,
+  warmup_ramp_step_rps: 1_000,
+  warmup_ramp_step_secs: 10,
+  regular_work_secs: 90,
+  baseline_window_secs: 60,
+  overload_secs: 90,
+  overload_ramp_step_rps: 1_000,
+  overload_ramp_step_secs: 3,
+  observe_secs: 180,
+};
+
 const DEFAULTS_BY_EXPERIMENT: Record<string, Partial<ExperimentParams>> = {
+  exp_lru: FIXED_RATE_DEFAULTS,
+  exp_lru_outage: { ...FIXED_RATE_DEFAULTS, outage_secs: 60, outage_node: 1 },
+  exp_dual: FIXED_RATE_DEFAULTS,
+  exp_dual_outage: { ...FIXED_RATE_DEFAULTS, outage_secs: 60, outage_node: 1 },
+  exp_ttl: FIXED_RATE_DEFAULTS,
+  exp_ttl_outage: { ...FIXED_RATE_DEFAULTS, outage_secs: 60, outage_node: 1 },
+  exp_leased: FIXED_RATE_DEFAULTS,
+  exp_leased_outage: { ...FIXED_RATE_DEFAULTS, outage_secs: 60, outage_node: 1 },
+  exp_combined: FIXED_RATE_DEFAULTS,
+  exp_combined_outage: { ...FIXED_RATE_DEFAULTS, outage_secs: 60, outage_node: 1 },
   baseline: {
     key_space:                      100_000,
     workers_per_shard:              50,
@@ -86,7 +137,7 @@ const DEFAULTS_BY_EXPERIMENT: Record<string, Partial<ExperimentParams>> = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function ConfigPanel({ running, onStart, onStop }: Props) {
+export function ConfigPanel({ running, onStart, onStop, nodesUp = true }: Props) {
   const [registry, setRegistry] = useState<ExperimentDef[]>([]);
   const [selectedModeId, setSelectedModeId] = useState<string>(DEFAULT_MODES[0].id);
   const [customSteps, setCustomSteps] = useState<string[]>([]);
@@ -225,7 +276,7 @@ export function ConfigPanel({ running, onStart, onStop }: Props) {
       )}
 
       {/* Param fields */}
-      <div style={{ overflowY: "auto", flex: 1, paddingRight: 2, marginTop: 4 }}>
+      <div style={{ paddingRight: 2, marginTop: 4 }}>
         {activeTabDef ? (
           activeTabDef.paramKeys.map((key) => {
             const meta = PARAM_META[key];
@@ -252,6 +303,12 @@ export function ConfigPanel({ running, onStart, onStop }: Props) {
           <div style={{ color: "#475569", fontSize: 11 }}>Select a mode to configure params.</div>
         )}
       </div>
+
+      {!running && !nodesUp && (
+        <div style={{ color: "#fbbf24", fontSize: 11, marginTop: 8, wordBreak: "break-word" }}>
+          Cache nodes not running — start the stack above first.
+        </div>
+      )}
 
       {error && (
         <div style={{ color: "#ef4444", fontSize: 11, marginTop: 8, wordBreak: "break-word" }}>
@@ -367,9 +424,7 @@ function CustomSequenceBuilder({
 const containerStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  height: "100%",
   padding: "12px 10px",
-  overflowY: "hidden",
 };
 
 const titleStyle: React.CSSProperties = {

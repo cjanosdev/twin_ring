@@ -1,0 +1,72 @@
+version: '3.8'
+
+# Phase 1: Data initialization at full Cassandra power.
+#
+# Run this ONCE (or after schema changes) to create the keyspace and preload
+# 100k keys into the named volume. The volume persists after containers stop,
+# so docker-compose-baseline.yml can start a constrained Cassandra that already
+# has all the data on disk.
+#
+# Usage:
+#   docker compose -f docker/docker-compose-init.yml down -v
+#   docker compose -f docker/docker-compose-init.yml up --build
+#   # Wait for preload to exit 0, then proceed to baseline compose.
+
+volumes:
+  cassandra_data:
+    name: docker_cassandra_data
+
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    environment:
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+      - CASSANDRA_CONCURRENT_READS=32
+      - CASSANDRA_CONCURRENT_WRITES=32
+      - CASSANDRA_CONCURRENT_COMPACTORS=1
+      - CASSANDRA_NUM_TOKENS=8
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # Rate limiter disabled during init — full throughput for preload.
+        # native_transport_rate_limiting_enabled: false
+        # native_transport_max_requests_per_second: 400
+        exec docker-entrypoint.sh cassandra -f
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "cqlsh -e 'SELECT now() FROM system.local'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 1g
+    cpus: 2.0
+
+  cassandra-init:
+    image: cassandra:4.1
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./cassandra-init.cql:/cassandra-init.cql
+    entrypoint: ["sh", "-c", "cqlsh cassandra -f /cassandra-init.cql"]
+    restart: "on-failure"
+
+  preload:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile.twin_ring
+    command: ["/app/preload"]
+    environment:
+      PRELOAD_KEYS: "100000"
+      CASSANDRA_HOST: "cassandra"
+      CASSANDRA_PORT: "9042"
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: "on-failure"

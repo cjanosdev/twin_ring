@@ -11,13 +11,28 @@ import {
   getRegistry,
 } from "./experimentRunner";
 import { watchCsv } from "./csvWatcher";
-import { ExperimentParams, ExperimentStep, RunInfo, SequenceRequest } from "./types";
+import { CsvRow, ExperimentParams, ExperimentStep, NoCacheRow, RunInfo, RunType, SequenceRequest } from "./types";
+import { getInfraStatus, runInit, runInitClean, runUp, runDown } from "./infraRunner";
 
 const WORKSPACE_ROOT = path.resolve(__dirname, "../../..");
 const RUNS_DIR = path.join(WORKSPACE_ROOT, "experiment_results", "runs");
+const RESULTS_DIR = path.join(WORKSPACE_ROOT, "experiment_results");
 const CONTROL_API = "http://localhost:9000";
 
 const app = Fastify({ logger: false });
+
+function inferRunType(filename: string): RunType {
+  if (filename.startsWith("simple_metastable")) return "metastable";
+  if (filename.startsWith("baseline_no_cache")) return "baseline_no_cache";
+  if (filename.startsWith("baseline_warmup"))   return "baseline_warmup";
+  if (filename.startsWith("baseline_steady"))   return "baseline_steady";
+  if (filename.startsWith("lru_"))              return "exp_lru";
+  if (filename.startsWith("dual-ring_"))        return "exp_dual";
+  if (filename.startsWith("ttl-tiered_"))       return "exp_ttl";
+  if (filename.startsWith("leased_"))           return "exp_leased";
+  if (filename.startsWith("combined_"))         return "exp_combined";
+  return "unknown";
+}
 
 // ── Runs browser ──────────────────────────────────────────────────────────────
 
@@ -36,6 +51,7 @@ app.get("/api/runs", async () => {
         filename: file,
         date: dateDir,
         size_bytes: fs.statSync(filePath).size,
+        run_type: inferRunType(file),
       });
     }
   }
@@ -55,7 +71,7 @@ app.get<{ Querystring: { path: string } }>("/api/runs/data", async (request, rep
     return reply.code(404).send({ error: "file not found" });
   }
   const content = fs.readFileSync(resolved, "utf8");
-  const records = parse(content, { columns: true, skip_empty_lines: true, cast: true });
+  const records: CsvRow[] = parse(content, { columns: true, skip_empty_lines: true, cast: true });
 
   for (const row of records) {
     const portMatch = String(row.node).match(/:(\d+)$/);
@@ -63,6 +79,31 @@ app.get<{ Querystring: { path: string } }>("/api/runs/data", async (request, rep
   }
 
   return records;
+});
+
+// Serve no-cache CSV rows (different schema: step/workers/ops_per_sec/…, no node column)
+app.get<{ Querystring: { path: string } }>("/api/runs/no-cache-data", async (request, reply) => {
+  const { path: filePath } = request.query;
+  if (!filePath) return reply.code(400).send({ error: "path required" });
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(RUNS_DIR)) return reply.code(403).send({ error: "invalid path" });
+  if (!fs.existsSync(resolved)) return reply.code(404).send({ error: "file not found" });
+  const content = fs.readFileSync(resolved, "utf8");
+  const records: NoCacheRow[] = parse(content, { columns: true, skip_empty_lines: true, cast: true });
+  return records;
+});
+
+// Summary JSONs for the two baseline experiments
+app.get("/api/baselines", async () => {
+  const read = (file: string) => {
+    const p = path.join(RESULTS_DIR, file);
+    if (!fs.existsSync(p)) return null;
+    try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
+  };
+  return {
+    baseline:         read("baseline.json"),
+    baseline_no_cache: read("baseline_no_cache.json"),
+  };
 });
 
 // ── Experiment registry ───────────────────────────────────────────────────────
@@ -147,6 +188,32 @@ app.get("/api/stream", async (request, reply) => {
   }
 
   return reply;
+});
+
+// ── Infrastructure control ────────────────────────────────────────────────────
+
+app.get("/api/infra/status", async (_, reply) => {
+  return reply.send(await getInfraStatus());
+});
+
+app.post("/api/infra/init", async (_, reply) => {
+  const result = runInit();
+  return reply.code(result.ok ? 200 : 400).send(result);
+});
+
+app.post("/api/infra/init-clean", async (_, reply) => {
+  const result = runInitClean();
+  return reply.code(result.ok ? 200 : 400).send(result);
+});
+
+app.post("/api/infra/up", async (_, reply) => {
+  const result = runUp();
+  return reply.code(result.ok ? 200 : 400).send(result);
+});
+
+app.post("/api/infra/down", async (_, reply) => {
+  const result = runDown();
+  return reply.code(result.ok ? 200 : 400).send(result);
 });
 
 // ── Cassandra mem proxy ───────────────────────────────────────────────────────

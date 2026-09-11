@@ -1,0 +1,7 @@
+{
+  "last_clean_db_p50_us": 1665,
+  "last_clean_ops_per_sec": 5536.8,
+  "last_clean_workers": 40,
+  "saturation_ops_per_sec": 5087.866666666667,
+  "saturation_workers": 80
+}

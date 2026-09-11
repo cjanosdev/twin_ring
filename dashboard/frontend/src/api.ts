@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
+  BaselineNoCacheSummary,
+  BaselineSummary,
+  CassandraMem,
   CsvRow,
   ExperimentDef,
   ExperimentParams,
   ExperimentStatus,
   ExperimentStep,
+  InfraStatus,
+  NoCacheRow,
   RunInfo,
-  CassandraMem,
 } from "./types";
 
 const BASE = "/api";
@@ -55,6 +59,19 @@ export async function apiListRuns(): Promise<RunInfo[]> {
 
 export async function apiGetRunData(filePath: string): Promise<CsvRow[]> {
   const res = await fetch(`${BASE}/runs/data?path=${encodeURIComponent(filePath)}`);
+  return res.json();
+}
+
+export async function apiGetNoCacheData(filePath: string): Promise<NoCacheRow[]> {
+  const res = await fetch(`${BASE}/runs/no-cache-data?path=${encodeURIComponent(filePath)}`);
+  return res.json();
+}
+
+export async function apiGetBaselines(): Promise<{
+  baseline: BaselineSummary | null;
+  baseline_no_cache: BaselineNoCacheSummary | null;
+}> {
+  const res = await fetch(`${BASE}/baselines`);
   return res.json();
 }
 
@@ -125,6 +142,51 @@ export function useSSEStream(enabled: boolean): {
   }, [enabled]);
 
   return { rows, clearRows };
+}
+
+// ── Infrastructure control ────────────────────────────────────────────────────
+
+export async function apiGetInfraStatus(): Promise<InfraStatus> {
+  const res = await fetch(`${BASE}/infra/status`);
+  return res.json();
+}
+
+async function postInfraAction(path: string): Promise<void> {
+  const res = await fetch(`${BASE}/infra/${path}`, { method: "POST" });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error ?? `Failed: ${path}`);
+}
+
+export const apiInfraInit = () => postInfraAction("init");
+export const apiInfraInitClean = () => postInfraAction("init-clean");
+export const apiInfraUp = () => postInfraAction("up");
+export const apiInfraDown = () => postInfraAction("down");
+
+/**
+ * Polls /api/infra/status every `intervalMs` milliseconds.
+ */
+export function useInfraPoller(intervalMs = 3000): InfraStatus | null {
+  const [status, setStatus] = useState<InfraStatus | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const poll = async () => {
+      try {
+        const s = await apiGetInfraStatus();
+        if (mounted) setStatus(s);
+      } catch {
+        // backend not up yet
+      }
+    };
+    poll();
+    const id = setInterval(poll, intervalMs);
+    return () => {
+      mounted = false;
+      clearInterval(id);
+    };
+  }, [intervalMs]);
+
+  return status;
 }
 
 /**
