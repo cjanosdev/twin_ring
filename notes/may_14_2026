@@ -1,0 +1,29 @@
+What should I be comparing?
+
+
+- latencies
+- cache hit rate
+- throughput
+
+
+Measure improvements to recovery
+- measure how much time to get back to some semi-recovered state
+    How do we define recovered?
+    * baseline: run the system
+    see what is throughput and latency before the failure (reusing cassandra to have some warm up period have 20-30 seconds warmup... 10seconds before you introduce failure what is sustained throughput and latency) Then fail cache and let it be failed for some number of time (fail it for several multiples of ttl if its 15 seconds keep it downf for a minute to force multiple cycles of ttl...then restart cache and see what happens naturally and how long does it take to recover to baseline)
+
+    baseline plus 4 other runs
+    - dual
+    - ttl
+    - lease
+    - all of them together 
+
+    
+    Run something on the cluster next week...hit up Owen?
+
+    Good exercise to look at a few papers from : https://www.hotstorage.org/2026/past-conferences.html
+
+
+    2025:
+    https://www.hotstorage.org/2025/
+    

@@ -1,0 +1,21 @@
+- Check lease implementation
+- Check that lease hammers db when node is down
+lock only works when cache node is alive
+
+
+- For dual-ring: Could have better performance while under cache failure
+- also for ttl delay
+
+- TODO (CHECK): track hottest keys from cache when node is down and check if secondary keys are still top hot keys on the cache that failed.
+
+for config issues: Tweak how many hot keys potentially for hot storage
+
+
+- could try uniform for absolute worst case scenario for caching (not practical workload case)
+
+
+* Look into multi-layered zipfian * 
+- zipfians with diff hot keys
+- ycsb implementation of zipfian have scrambled zipfian mode (diff keys appear as hot). If I run 10 would be more realistic.
+
+Another option is to create a super skewed zipfian distribution
