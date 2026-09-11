@@ -3,7 +3,6 @@ use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-
 /// A logger that writes CSV lines
 #[derive(Clone)]
 pub struct CsvLogger {
@@ -24,11 +23,7 @@ impl CsvLogger {
         // Write header only if file is empty
         let metadata = std::fs::metadata(path).unwrap();
         if metadata.len() == 0 {
-            writeln!(
-                writer,
-                "ts_ms,event,key,hit,latency_us,ttl_remaining_ms"
-            )
-            .unwrap();
+            writeln!(writer, "ts_ms,event,key,hit,latency_us,ttl_remaining_ms").unwrap();
             writer.flush().unwrap();
         }
 
@@ -57,7 +52,9 @@ impl CsvLogger {
             key,
             if hit { 1 } else { 0 },
             latency.as_micros(),
-            ttl_remaining.map(|d| d.as_millis().to_string()).unwrap_or("".into())
+            ttl_remaining
+                .map(|d| d.as_millis().to_string())
+                .unwrap_or("".into())
         );
 
         let mut w = self.writer.lock().unwrap();
@@ -65,4 +62,3 @@ impl CsvLogger {
         w.flush().unwrap();
     }
 }
-

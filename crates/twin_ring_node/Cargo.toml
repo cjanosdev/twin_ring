@@ -30,4 +30,6 @@ anyhow = "1"
 
 serde_json = "1"
 
+reqwest = { version = "0.12", features = ["json"] }
+
 twin_ring_core = { path = "../twin_ring_core" }
