@@ -1,52 +1,60 @@
 version: '3.8'
 
+# Phase 2: Experiment compose — constrained Cassandra for metastable failure.
+#
+# Requires the named volume `cassandra_data` to already exist (created by
+# docker-compose-init.yml). Cassandra starts with the preloaded data on disk
+# but runs under tight CPU/heap constraints so it saturates naturally during
+# fault inject.
+#
+# Usage (every experiment run):
+#   docker compose -f docker/docker-compose-baseline.yml down
+#   docker compose -f docker/docker-compose-baseline.yml up --build -d
+#   cargo run -p twin_ring_exp --bin baseline
+#   cargo run -p twin_ring_exp --bin simple_metastable
+
+volumes:
+  cassandra_data:
+    external: true
+    name: docker_cassandra_data   # populated by docker-compose-init.yml
+
 services:
   cassandra:
     image: cassandra:4.1
     container_name: cassandra
     ports:
       - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
     environment:
-      # Hard JVM heap cap — prevents Cassandra from borrowing host memory.
-      # Small heap → more GC pressure → slower under load (good for experiments).
-      - MAX_HEAP_SIZE=192M
-      - HEAP_NEWSIZE=48M
-      # Read/write thread pools — low values keep Cassandra saturated under the
-      # thundering herd so the metastable loop sustains.
+      # Constrained heap → more GC pressure → slower queries under load.
+      - MAX_HEAP_SIZE=256M
+      - HEAP_NEWSIZE=128M
+      # Low thread count: 8 threads can handle baseline miss rate (~218/sec/node)
+      # but saturate under fault inject (~650/sec/node) → queue backs up →
+      # cassandra_get() 300ms timeout fires → DbResult::Error → feedback loop.
       - CASSANDRA_CONCURRENT_READS=2
       - CASSANDRA_CONCURRENT_WRITES=2
       - CASSANDRA_CONCURRENT_COMPACTORS=1
       - CASSANDRA_NUM_TOKENS=8
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # Set Cassandra's native read timeout to 2s (realistic production value).
+        # Under overload, Cassandra fires ReadTimeoutException over the CQL wire —
+        # the scylla driver returns QueryError::DbError → DbResult::Error in the node.
+        sed -i 's/^read_request_timeout:.*/read_request_timeout: 100ms/' /etc/cassandra/cassandra.yaml
+        sed -i 's/^concurrent_reads:.*/concurrent_reads: 2/' /etc/cassandra/cassandra.yaml
+        sed -i 's/^native_transport_max_threads:.*/native_transport_max_threads: 8/' /etc/cassandra/cassandra.yaml
+        exec docker-entrypoint.sh cassandra -f
     healthcheck:
       test: ["CMD", "bash", "-lc", "cqlsh -e 'SELECT now() FROM system.local'"]
       interval: 5s
       timeout: 5s
       retries: 20
-    mem_limit: 512m
-    cpus: 0.75
-
-  cassandra-init:
-    image: cassandra:4.1
-    depends_on:
-      cassandra:
-        condition: service_healthy
-    volumes:
-      - ./cassandra-init.cql:/cassandra-init.cql
-    entrypoint: ["sh", "-c", "cqlsh cassandra -f /cassandra-init.cql"]
-    restart: "on-failure"
-
-  preload:
-    build:
-      context: ..
-      dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/preload"]
-    environment:
-      PRELOAD_KEYS: "100000"   # number of keys to insert (can change per run)
-    depends_on:
-      cassandra-init:
-        condition: service_completed_successfully
-    restart: "on-failure"
-
+    mem_limit: 1g
+    cpus: 1.0
 
   control:
     build:
@@ -55,17 +63,17 @@ services:
     ports:
       - "9000:9000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # <-- control node has access
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     depends_on:
-      - cache_node_1
-      - cache_node_2
-      - cache_node_3
+      cassandra:
+        condition: service_healthy
 
   cache_node_1:
+    container_name: twin_ring_cache_node_1
     build:
       context: ..
       dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/twin_ring_node", "--port", "8001", "--ttl", "30", "--log", "cache1.csv"]
+    command: ["/app/twin_ring_node", "--port", "8001", "--ttl", "10", "--max-entries", "25000", "--log", "cache1.csv"]
     ports:
       - "8001:8001"
     environment:
@@ -73,17 +81,23 @@ services:
       CASSANDRA_HOST: "cassandra"
       CASSANDRA_PORT: "9042"
       CASSANDRA_KEYSPACE: "kvstore"
+      CACHE_STRATEGY: ${CACHE_STRATEGY:-lru}
+      NODE_INDEX: "0"
+      CLUSTER_MEMBERS: ${CLUSTER_MEMBERS:-0,1,2}
+      CLUSTER_SIZE: "3"
+      PEER_URLS: "http://cache_node_2:8002,http://cache_node_3:8003"
     mem_limit: 128m
     cpus: 1.0
     depends_on:
-      preload:
-        condition: service_completed_successfully
+      cassandra:
+        condition: service_healthy
 
   cache_node_2:
+    container_name: twin_ring_cache_node_2
     build:
       context: ..
       dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/twin_ring_node", "--port", "8002", "--ttl", "30", "--log", "cache2.csv"]
+    command: ["/app/twin_ring_node", "--port", "8002", "--ttl", "10", "--max-entries", "25000", "--log", "cache2.csv"]
     ports:
       - "8002:8002"
     environment:
@@ -91,17 +105,23 @@ services:
       CASSANDRA_HOST: "cassandra"
       CASSANDRA_PORT: "9042"
       CASSANDRA_KEYSPACE: "kvstore"
+      CACHE_STRATEGY: ${CACHE_STRATEGY:-lru}
+      NODE_INDEX: "1"
+      CLUSTER_MEMBERS: ${CLUSTER_MEMBERS:-0,1,2}
+      CLUSTER_SIZE: "3"
+      PEER_URLS: "http://cache_node_1:8001,http://cache_node_3:8003"
     mem_limit: 128m
     cpus: 1.0
     depends_on:
-      preload:
-        condition: service_completed_successfully
+      cassandra:
+        condition: service_healthy
 
   cache_node_3:
+    container_name: twin_ring_cache_node_3
     build:
       context: ..
       dockerfile: ./docker/Dockerfile.twin_ring
-    command: ["/app/twin_ring_node", "--port", "8003", "--ttl", "30", "--log", "cache3.csv"]
+    command: ["/app/twin_ring_node", "--port", "8003", "--ttl", "10", "--max-entries", "25000", "--log", "cache3.csv"]
     ports:
       - "8003:8003"
     environment:
@@ -109,8 +129,13 @@ services:
       CASSANDRA_HOST: "cassandra"
       CASSANDRA_PORT: "9042"
       CASSANDRA_KEYSPACE: "kvstore"
+      CACHE_STRATEGY: ${CACHE_STRATEGY:-lru}
+      NODE_INDEX: "2"
+      CLUSTER_MEMBERS: ${CLUSTER_MEMBERS:-0,1,2}
+      CLUSTER_SIZE: "3"
+      PEER_URLS: "http://cache_node_1:8001,http://cache_node_2:8002"
     mem_limit: 128m
     cpus: 1.0
     depends_on:
-      preload:
-        condition: service_completed_successfully
+      cassandra:
+        condition: service_healthy
