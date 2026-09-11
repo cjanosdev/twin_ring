@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 twin_ring_core = { path = "../twin_ring_core" }
+clap = { version = "4", features = ["derive"] }
 tokio = { version = "1.47", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate"] }
 anyhow = "1.0"
@@ -15,7 +16,11 @@ serde_json = "1"
 
 rand = { version = "0.9" }
 rand_chacha = "0.9"
+rand_distr = "0.5"
 futures = "0.3"
 hdrhistogram = "7"
 csv = "1"
 chrono = { version = "0.4", features = ["clock"] }
+
+[dev-dependencies]
+tokio = { version = "1.47", features = ["test-util"] }
