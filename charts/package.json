@@ -1,0 +1,14 @@
+{
+  "name": "twin-ring-charts",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "chart": "node chart.mjs"
+  },
+  "dependencies": {
+    "chart.js": "^3.9",
+    "chartjs-node-canvas": "^4",
+    "chartjs-plugin-annotation": "^1",
+    "csv-parse": "^5"
+  }
+}
